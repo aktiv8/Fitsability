@@ -11,12 +11,14 @@ dependencies = ["numpy", "scipy", "matplotlib"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+gui = ["PySide6"]
 
 [project.scripts]
 fitstability = "fitstability.cli:main"
+fitstability-gui = "fitstability.gui.app:main"
 
 [tool.setuptools]
-packages = ["fitstability"]
+packages = ["fitstability", "fitstability.gui"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

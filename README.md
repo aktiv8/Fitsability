@@ -4,6 +4,28 @@ Peak-fit stability diagnostics for XPS, after Moeini, Haack, Fairley, Fernandez,
 Linford, *Box plots: a simple graphical tool for visualizing overfitting in peak fitting*,
 J. Electron Spectrosc. Relat. Phenom. 250 (2021) 147094. GUI-free core, CLI and matplotlib plots.
 
+## GUI
+
+```bash
+.venv\Scripts\python -m pip install -e ".[gui]"     # adds PySide6
+.venv\Scripts\fitstability-gui                       # or: python -m fitstability.gui [file]
+```
+
+A desktop window (light/dark) with the same engine as the command line:
+
+- **Open** a VAMAS (`.vms`) or CSV/text file with the file dialog (Ctrl+O), drag it onto the window, or pick
+  from *Open recent*. A VAMAS file lists its blocks, marking those that hold a CasaXPS fit; a CSV opens an
+  import dialog (preview, delimiter, energy and intensity columns, binding or kinetic energy, counts or
+  counts/s).
+- **Peak model:** for a Casa-fitted block the fit is loaded into an editable table (shape, position, FWHM,
+  bounds, and constraints as short rules: `free`, `fixed`, `C1 + 5.2`, `C1 * 1.2`, `group main`). For CSV
+  data, or any block, add peaks by hand or load/save the protocol as JSON. *Reset to Casa fit* undoes edits.
+- **Run:** *Fit once*, *Box plot test*, *Monte Carlo*, *Uniqueness* (F5-F9), in the background with a progress
+  bar and Cancel. Results appear in their own tabs with the verdict and notes; editing the model marks them stale.
+  Uniqueness lists the tied or fixed parameters it did not scan.
+- **Export:** the current figure (PNG/PDF/SVG), the multi-start CSV, a text report; *Run > Box plot on every
+  block with a Casa fit* analyses a whole file and saves a summary CSV and one figure per block.
+
 ## Methods
 
 | Command | Method | Reads as |

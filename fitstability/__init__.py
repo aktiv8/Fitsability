@@ -8,7 +8,8 @@ from .experiments import (MonteCarloResult, MultiStartResult, UniquenessResult, 
                           unscannable_reason, UNIQUENESS_METHOD_NOTE)
 from .casa import CasaFitError, CasaModel, casa_models, parse_fit
 from .fit import fit, fit_nominal
-from .io import ProtocolSet, load_protocol, load_protocols, read_spectrum, synthetic_spectrum
+from .io import (ProtocolSet, load_protocol, load_protocols, protocol_to_cfg, read_spectrum, save_protocol,
+                 sniff_table, synthetic_spectrum)
 from .model import FitProblem, FitResult, PeakSpec, Protocol, StartPoint
 from .vamas import Block, VamasError, VamasFile, read_vamas, write_vamas
 from .verdict import Verdict, assess, summary_table
@@ -18,7 +19,7 @@ __all__ = [
     "multistart", "monte_carlo", "uniqueness", "random_start",
     "MultiStartResult", "MonteCarloResult", "UniquenessResult",
     "Verdict", "assess", "summary_table",
-    "read_spectrum", "load_protocol", "load_protocols", "ProtocolSet", "read_vamas", "write_vamas",
+    "read_spectrum", "sniff_table", "save_protocol", "protocol_to_cfg", "load_protocol", "load_protocols", "ProtocolSet", "read_vamas", "write_vamas",
     "CasaFitError", "CasaModel", "casa_models", "parse_fit",
     "VamasFile", "Block", "VamasError", "scannable_parameters", "unscannable_reason", "UNIQUENESS_METHOD_NOTE", "synthetic_spectrum",
 ]

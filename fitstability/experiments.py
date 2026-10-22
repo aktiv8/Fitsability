@@ -16,17 +16,46 @@ from .fit import fit, fit_nominal
 from .model import FitProblem, FitResult, StartPoint
 
 
+class Cancelled(Exception):
+    """Raised by an experiment when its ``cancel()`` callback returns true."""
+
+
 def _fit_one(args):
     problem, start = args
     return fit(problem, start)
 
 
-def _run(problem, starts, n_jobs):
-    tasks = [(problem, s) for s in starts]
-    if n_jobs == 1 or len(tasks) < 2:
-        return [_fit_one(t) for t in tasks]
+def _run_tasks(tasks, n_jobs=1, progress=None, cancel=None):
+    """Fit every (problem, start) task, in order. ``progress(done, total)`` is called after each fit
+    and ``cancel()`` is polled between fits (raising :class:`Cancelled`)."""
+    total = len(tasks)
+    if n_jobs == 1 or total < 2:
+        out = []
+        for i, t in enumerate(tasks):
+            if cancel and cancel():
+                raise Cancelled()
+            out.append(_fit_one(t))
+            if progress:
+                progress(i + 1, total)
+        return out
+    out = [None] * total
+    done = 0
     with ProcessPoolExecutor(max_workers=n_jobs) as ex:
-        return list(ex.map(_fit_one, tasks, chunksize=max(1, len(tasks) // (4 * n_jobs))))
+        futures = {ex.submit(_fit_one, t): i for i, t in enumerate(tasks)}
+        try:
+            from concurrent.futures import as_completed
+            for f in as_completed(futures):
+                if cancel and cancel():
+                    raise Cancelled()
+                out[futures[f]] = f.result()
+                done += 1
+                if progress:
+                    progress(done, total)
+        except Cancelled:
+            for f in futures:
+                f.cancel()
+            raise
+    return out
 
 
 # -- multi-start ---------------------------------------------------------------------------
@@ -90,10 +119,11 @@ def random_start(problem: FitProblem, rng: np.random.Generator, randomize_pos: f
 
 def multistart(problem: FitProblem, n_starts: int = 32, seed: int | None = None,
                randomize_pos: float = 0.0, randomize_fwhm: float = 0.0, n_jobs: int = 1,
-               bounds_fraction: float = 0.0) -> MultiStartResult:
+               bounds_fraction: float = 0.0, progress=None, cancel=None) -> MultiStartResult:
     rng = np.random.default_rng(seed)
     starts = [random_start(problem, rng, randomize_pos, randomize_fwhm, bounds_fraction) for _ in range(n_starts)]
-    return MultiStartResult(problem, starts, _run(problem, starts, n_jobs))
+    return MultiStartResult(problem, starts,
+                            _run_tasks([(problem, s) for s in starts], n_jobs, progress, cancel))
 
 
 # -- Monte Carlo ---------------------------------------------------------------------------
@@ -112,7 +142,7 @@ class MonteCarloResult:
 
 
 def monte_carlo(problem: FitProblem, n_trials: int = 100, seed: int | None = None,
-                best: FitResult | None = None, n_jobs: int = 1) -> MonteCarloResult:
+                best: FitResult | None = None, n_jobs: int = 1, progress=None, cancel=None) -> MonteCarloResult:
     """Poisson-noise replicates of the best-fit curve, each refitted from the best fit."""
     rng = np.random.default_rng(seed)
     best = best or fit_nominal(problem)
@@ -122,12 +152,7 @@ def monte_carlo(problem: FitProblem, n_trials: int = 100, seed: int | None = Non
     for _ in range(n_trials):
         y = rng.poisson(np.maximum(curve * cs, 0.0)) / cs
         tasks.append((problem.with_y(y), best.as_start()))
-    if n_jobs == 1:
-        results = [_fit_one(t) for t in tasks]
-    else:
-        with ProcessPoolExecutor(max_workers=n_jobs) as ex:
-            results = list(ex.map(_fit_one, tasks, chunksize=max(1, n_trials // (4 * n_jobs))))
-    return MonteCarloResult(problem, best, results)
+    return MonteCarloResult(problem, best, _run_tasks(tasks, n_jobs, progress, cancel))
 
 
 # -- uniqueness ----------------------------------------------------------------------------
@@ -197,7 +222,7 @@ class UniquenessResult:
 
 
 def uniqueness(problem: FitProblem, peak: str, parameter: str = "pos", half_range: float = 0.8,
-               n_points: int = 9, best: FitResult | None = None) -> UniquenessResult:
+               n_points: int = 9, best: FitResult | None = None, progress=None, cancel=None) -> UniquenessResult:
     """The paper's uniqueness plot for one free parameter (see :data:`UNIQUENESS_METHOD_NOTE`).
 
     Raises ``ValueError`` for a parameter that is not free in the protocol (fixed position,
@@ -221,12 +246,16 @@ def uniqueness(problem: FitProblem, peak: str, parameter: str = "pos", half_rang
     values = np.linspace(lo, centre + half_range, n_points)
     key = "fix_pos" if parameter == "pos" else "fix_fwhm"
     mse = []
-    for v in values:
+    for n, v in enumerate(values):
+        if cancel and cancel():
+            raise Cancelled()
         prob2 = FitProblem(problem.x, problem.y, proto.with_peak(peak, **{key: True, parameter: float(v)}),
                            problem.count_scale)
         s = best.as_start()
         getattr(s, parameter)[i] = v
         mse.append(fit(prob2, s).chi2 / len(problem.x))
+        if progress:
+            progress(n + 1, len(values))
     mse = np.array(mse)
     k = int(np.argmin(mse))
     return UniquenessResult(peak, parameter, values, mse, float(values[k]), float(mse[k]))
