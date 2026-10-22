@@ -10,7 +10,8 @@ Conventions and quirks, checked against Thermo K-Alpha and CasaXPS-written files
 * With several corresponding variables (Counts and Transmission on the K-Alpha) the ordinate
   values are interleaved and their count is the total, so each block has n / n_vars points.
 * The abscissa is read as given: Kinetic Energy is converted to binding energy as
-  ``hv - KE`` (no work function), Binding Energy is used as is. Axes are returned ascending.
+  ``hv - KE`` (no work function), Binding Energy is used as is. An unlabelled axis is taken as kinetic
+  (Casa writes text-converted files so, with hv = 0 and negative energies: BE = -axis). Axes are returned ascending.
 * MAP experiment mode adds three header lines and four per-block lines (x, y, field of view);
   they are skipped.
 * Whether the ordinate is total counts or counts per second is not reliably stated in the
@@ -237,8 +238,8 @@ def _read_block(ln: _Lines, mode: str, nev: int, index: int) -> Block:
     axis = start + step * np.arange(data.shape[0])
     if "binding" in abscissa:
         be = axis
-    elif "kinetic" in abscissa:
-        be = b.hv_ev - axis
+    elif "kinetic" in abscissa or not abscissa.strip():
+        be = b.hv_ev - axis     # an unlabelled axis (Casa-converted text files) is a kinetic-energy axis, hv possibly 0
     else:
         raise VamasError(f"block {index}: unknown energy axis {abscissa!r}")
     order = np.argsort(be)

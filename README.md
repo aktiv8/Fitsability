@@ -84,14 +84,24 @@ reference combined that way, and no other constraint form occurs. Lower = upper 
 - **Frames and units:** positions and windows are kinetic energies; they are converted to the calibrated
   binding energies CasaXPS shows (the `Calib` line). Areas are counts/s x eV and are multiplied by
   dwell x scans for a counts ordinate (`--count-units cps` if the ordinate is already counts/s).
-- **Line shapes and backgrounds:** GL/SGL are exact; LA and LF (and DS) are reconstructions of CasaXPS's
-  from the author's eXPoSe SpectraDeck (`casa_lineshapes.py`, vendored). Shirley, Linear and Tougaard
-  (U2/U3/W) backgrounds are recomputed from the data in the region window. Library-spectrum
-  components, spline backgrounds and E-Tougaard cannot be reproduced: that region is skipped and the reason printed.
-- **Check:** each region reports how well CasaXPS's saved fit reproduces the data (`rel_rms`, `RSTD`).
-  `scripts/validate_casa.py` does this over many files: on 313 regions in the author's files the median
-  relative rms is 0.6 % of the data range (90th percentile 2.2 %). A few files do not reproduce (areas in
-  other units, an edited file): the area bounds are then opened and only the tie ratios are used.
+- **Line shapes and backgrounds:** GL/SGL are exact; LA, LF, DS (two-parameter), A, F, H, SB and TP are
+  reconstructions of CasaXPS's from the author's eXPoSe SpectraDeck (`casa_lineshapes.py`, vendored).
+  Shirley, Linear and the U 2 / U 3 / U 4 / U Poly Tougaard backgrounds are recomputed from the data in the
+  region window (`U 3 Tougaard` is stored like `U 2`, with a three-parameter form when D is non-zero).
+  Refused, with the reason printed, rather than drawn wrongly: library-spectrum components (their shape
+  lives in CasaXPS's library, not the file), the shape families LS, LSF, QF, QSF, QA, QS, E, SL, PHI, the T(k)
+  tail suffix and three-parameter DS (none reproduced real data), the plain `Tougaard` background, and
+  spline, step, edge, polynomial, SP2SP3 and Min Limits backgrounds.
+- **Check:** each region reports how well CasaXPS's saved fit reproduces the data (`rel_rms`, `RSTD`,
+  `CasaModel.reproduced`), with a note when it does not. `scripts/validate_casa.py` runs this over many files.
+  On the 509 distinct Casa-fitted VAMAS files found on the author's local drives (the 4,254 cloud-only OneDrive
+  files were left untouched), 5,156 regions were rebuilt and **97.9 %** reproduce the saved fit (rms residual
+  under 3 % of the data range, or Poisson-weighted RSTD under 2): Shirley 98 %, U 2 Tougaard 96 %, Linear 99 %;
+  LA 98 %, GL 98 %, LF 97 %. 1,621 further regions were skipped as above, 1,466 of them for library-spectrum
+  components (Ce 3d, Sb 3d, Ni 2p...). Where a saved fit does not reproduce (about 47 regions: files edited after fitting,
+  areas in other units, LA with an unusual third parameter) the areas are rescaled if that fixes it, else the area
+  bounds are opened and only the tie ratios are used. U 3 Tougaard is the least evidenced: 14 regions reproduced
+  fully, and its reconstruction meets the data at both ends in about 80 % of 549 regions (the rest weak, noisy spectra).
 - **Starts:** by default the Casa fit's own positions and widths are the nominal start, so only the areas
   are random (the paper's protocol). Casa's saved values are usually already an optimum, so for a real test
   also spread positions and widths: `--bounds-fraction f` draws each free position and width uniformly
@@ -99,7 +109,8 @@ reference combined that way, and no other constraint form occurs. Lower = upper 
 - **Uniqueness** probes only what is free in Casa: tied positions, tied or fixed FWHM are listed as not
   scanned, with the tie that removes them.
 - **Not handled:** overlapping regions that CasaXPS merges into one segmented background (each region is
-  analysed on its own), and VAMAS experiment modes other than NORM and MAP.
+  analysed on its own), and VAMAS experiment modes other than NORM and MAP (sputter-depth-profile and
+  irregular-scan files are rejected with a message).
 
 ## Use
 

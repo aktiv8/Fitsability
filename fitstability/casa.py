@@ -181,6 +181,31 @@ def _attribute_regions(fit: CasaFit) -> None:
             c.region = hits[0].name
 
 
+_U3 = re.compile(r"^u\s*3\s*tougaard", re.I)
+
+
+def reconstruct_background(kind: str, cps, ke, avg: int, params):
+    """Background of ``cps`` on ascending kinetic energy ``ke``, or None if the type is not reproducible.
+
+    Beyond what ``casa_lineshapes.background`` knows: ``U 3 Tougaard`` is stored like ``U 2 Tougaard``
+    (B, then C with a minus sign, D = 0) and is rebuilt that way, or with the three-parameter cross
+    section (natural signs) when D is non-zero. This was found on 549 regions of real files and the
+    reconstructions meet the data at both ends in about 80 % of them (the rest are weak, noisy spectra).
+    Plain ``Tougaard`` is refused: its parameters did not reproduce the data on 32 regions.
+    """
+    k = (kind or "").strip().lower()
+    if k == "tougaard":
+        raise CasaFitError("the plain 'Tougaard' background is not reproduced (it did not match the data on the 32 "
+                           "regions of real files checked); U 2/U 3/U 4 Tougaard, Shirley and Linear are")
+    if _U3.match(k):
+        if len(params) < 5 or not params[2]:
+            return None
+        if params[4]:
+            return cl.tougaard_3param(ke, cps, params[2], params[3], params[4], avg, end_offset=params[1])
+        return cl.background("U 2 Tougaard", cps, avg, x=ke, params=params)
+    return cl.background(kind, cps, avg, x=ke, params=params)
+
+
 @dataclass
 class CasaBackground:
     """A region's CasaXPS background as a picklable ``f(x, y)`` on ascending binding energy.
@@ -195,7 +220,7 @@ class CasaBackground:
     def __call__(self, x, y):
         ke = -np.asarray(x, float)[::-1]            # ascending kinetic energy (up to a constant)
         cps = np.asarray(y, float)[::-1] / self.scale
-        bg = cl.background(self.kind, cps, self.avg, x=ke, params=self.params)
+        bg = reconstruct_background(self.kind, cps, ke, self.avg, self.params)
         if bg is None:
             raise CasaFitError(f"background type {self.kind!r} cannot be reconstructed")
         return (np.asarray(bg, float) * self.scale)[::-1]
@@ -215,8 +240,33 @@ class CasaModel:
     rel_rms: float = 0.0         # rms of (data - stored fit) / data range: how well Casa's saved fit reproduces
     rstd: float = 0.0            # the same, Poisson-weighted (CasaXPS "RSTD")
 
+    @property
+    def reproduced(self) -> bool:
+        """Does CasaXPS's saved fit reproduce the data here (rms residual within 3 % of the range, or a
+        Poisson-weighted RSTD under 2)? When not, the saved values should not be trusted as a good fit."""
+        return self.rel_rms < 0.03 or self.rstd < 2.0
+
     def problem(self) -> FitProblem:
         return FitProblem(self.x, self.y, self.protocol, self.count_scale)
+
+
+# Line-shape families that did not reproduce the data on real files (median relative rms above 15 %,
+# 0 % of regions reproduced): the reader refuses them instead of drawing a wrong shape.
+UNRELIABLE_SHAPE_FAMILIES = {"LS", "LSF", "QF", "QSF", "QA", "QS", "E", "SL", "PHI"}
+_FAMILY = re.compile(r"([A-Za-z]+)\(")
+
+
+def unreliable_shape(shape: str) -> str | None:
+    """Why a Casa shape string is not rebuilt (None if it is)."""
+    bad = sorted(set(_FAMILY.findall(shape)) & UNRELIABLE_SHAPE_FAMILIES)
+    if bad:
+        return f"line-shape family {'/'.join(bad)} is not reproduced (it did not match the data on real files)"
+    if re.search(r"\)\s*T\(", shape):
+        return "the T(k) tail suffix is not reproduced (it did not match the data on real files)"
+    m = re.match(r"^DS\(([^()]*)\)", shape)
+    if m and len(m.group(1).split(",")) >= 3:
+        return "the three-parameter DS shape is not reproduced (it did not match the data on real files)"
+    return None
 
 
 def _unique_names(comps) -> list[str]:
@@ -287,7 +337,13 @@ def describe_skips(block) -> list[str]:
 
 def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0) -> CasaModel:
     for c in comps:
+        if c.shape.startswith("%&"):
+            raise CasaFitError(f"{c.name} is a CasaXPS library-spectrum component ({c.shape[2:].lstrip('<>')}): "
+                               "its line shape is held in CasaXPS's library, not in the file, so it cannot be rebuilt")
         bad = cl.check_shape(c.shape)
+        why = unreliable_shape(c.shape)
+        if why:
+            raise CasaFitError(f"{c.name} has line shape {c.shape!r}: {why}")
         if not bad:
             try:
                 cl.component_curve(np.linspace(-5.0, 5.0, 101), c.shape, 0.0, 1.0, 1.0)
@@ -304,8 +360,11 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0)
         for kind, par in (("area", c.area), ("fwhm", c.fwhm), ("pos", c.pos)):
             if par.tied:
                 if par.tie not in ids:
-                    notes.append(f"{c.name}.{kind} is tied to a component outside region {reg.name!r}; held fixed")
-                    kw[f"fix_{kind}"] = True
+                    if kind == "area":      # there is no 'fixed area': leave it a free parameter
+                        notes.append(f"{c.name}.area is tied to a component outside region {reg.name!r}; left free")
+                    else:
+                        notes.append(f"{c.name}.{kind} is tied to a component outside region {reg.name!r}; held fixed")
+                        kw[f"fix_{kind}"] = True
                 else:
                     ref = names[ids[par.tie]]
                     kw[f"{kind}_tie"] = (ref, -par.factor if kind == "pos" else par.factor)
@@ -344,7 +403,83 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0)
     model.rel_rms = float(np.sqrt(np.mean((y - env) ** 2)) / rng)
     model.rstd = float(np.sqrt(np.mean(((y - env) / prob.sigma) ** 2)))
     if model.rel_rms > RELAX_AREA_BOUNDS_ABOVE or float(env.max()) > 3.0 * float(y.max()):
-        model.notes.append(f"CasaXPS's saved fit does not reproduce the data here (relative rms {model.rel_rms:.2f}); "
-                           "its areas may be in other units, so area bounds are opened and only tie ratios are used")
-        model.protocol = Protocol([PeakSpec(**{**p.__dict__, "area_bounds": (0.0, float("inf"))}) for p in peaks], bg)
+        _rescue_areas(model, prob, peaks, bg)
+    elif not model.reproduced:
+        model.notes.append(f"CasaXPS's saved fit is only roughly reproduced here (relative rms {model.rel_rms:.3f}, "
+                           f"RSTD {model.rstd:.1f}): a line shape or background may differ from CasaXPS's own")
     return model
+
+
+def _rescue_areas(model: CasaModel, prob: FitProblem, peaks, bg) -> None:
+    """The saved fit does not reproduce the data: usually its areas are in other units (or the file was
+    edited after fitting). A single least-squares scale on the component sum is tried; if it makes the
+    stored fit reproduce the data the areas and their bounds are rescaled, otherwise the area bounds are
+    opened. Either way only the shape, positions, widths and tie ratios are relied on, since multi-start
+    draws its own random areas."""
+    s = model.stored
+    comps = prob.components(s).sum(axis=0)
+    net = prob.y - prob.background
+    denom = float(comps @ comps)
+    scale = float(net @ comps) / denom if denom > 0 else 0.0
+    rng = max(float(prob.y.max() - prob.y.min()), 1e-30)
+    rel0 = model.rel_rms
+    rel1 = float(np.sqrt(np.mean((prob.y - prob.background - scale * comps) ** 2)) / rng)
+    if scale > 0 and rel1 < min(0.5 * rel0, RELAX_AREA_BOUNDS_ABOVE):
+        model.protocol = Protocol([PeakSpec(**{**p.__dict__, "area_bounds": (p.area_bounds[0] * scale, p.area_bounds[1] * scale)})
+                                   for p in peaks], bg)
+        model.stored = StartPoint(s.pos, s.fwhm, s.area * scale)
+        model.rel_rms = rel1
+        model.rstd = float(np.sqrt(np.mean(((prob.y - prob.model(model.stored)) / prob.sigma) ** 2)))
+        model.notes.append(f"CasaXPS's saved areas did not match the data (relative rms {rel0:.2f}); they were rescaled "
+                           f"by {scale:.3g}, after which the saved fit reproduces it (relative rms {rel1:.3f})")
+    else:
+        model.notes.append(f"CasaXPS's saved fit does not reproduce the data here (relative rms {rel0:.2f}); its areas "
+                           "may be in other units, so area bounds are opened and only tie ratios are used")
+        model.protocol = Protocol([PeakSpec(**{**p.__dict__, "area_bounds": (0.0, float("inf"))}) for p in peaks], bg)
+
+
+@dataclass
+class BackgroundCheck:
+    region: str
+    kind: str
+    ok: bool
+    end_resid: float        # largest |data - background| at the two ends, in Poisson sigmas
+    frac_below: float       # share of points where the data lie below the background by more than 3 sigma
+    reason: str = ""
+
+
+def background_check(block, area_units: str = "counts") -> list[BackgroundCheck]:
+    """Sanity-check the reconstructed background of every region, with no line shapes needed.
+
+    A CasaXPS background is anchored on the data at the region ends and sits below the data
+    between them, so a correct reconstruction has the data meeting it at both ends and almost
+    never below it. This is a weak but shape-independent test, used for regions whose components
+    cannot be rebuilt (library spectra), where the stored fit cannot be compared with the data.
+    """
+    fit = parse_fit(block.comments)
+    if fit is None:
+        return []
+    k = float(block.dwell_s * block.scans) if area_units == "counts" and block.dwell_s and block.scans else 1.0
+    x_all = np.asarray(block.be, float) + fit.calib_shift
+    y_all = np.asarray(block.y, float)
+    off_reg = block.hv_ev + fit.calib_shift - fit.shift_of_regions()
+    out = []
+    for reg in fit.regions:
+        lo, hi = off_reg - reg.end_ke, off_reg - reg.start_ke
+        sel = (x_all >= lo - 1e-6) & (x_all <= hi + 1e-6)
+        if sel.sum() < 10:
+            out.append(BackgroundCheck(reg.name, reg.background, False, float("nan"), float("nan"), "fewer than 10 points"))
+            continue
+        x, y = x_all[sel], y_all[sel]
+        try:
+            bg = CasaBackground(reg.background, reg.avg, reg.params, k)(x, y)
+        except CasaFitError as e:
+            out.append(BackgroundCheck(reg.name, reg.background, False, float("nan"), float("nan"), str(e)))
+            continue
+        sigma = np.sqrt(np.maximum(y, 1.0))
+        n = max(reg.avg, 1)
+        ends = max(abs(float(np.mean((y - bg)[:n]))) / float(np.mean(sigma[:n])),
+                   abs(float(np.mean((y - bg)[-n:]))) / float(np.mean(sigma[-n:])))
+        below = float(np.mean((y - bg) < -3 * sigma))
+        out.append(BackgroundCheck(reg.name, reg.background, ends < 6 and below < 0.03, ends, below))
+    return out

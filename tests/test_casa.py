@@ -136,3 +136,86 @@ def test_no_fit_and_unsupported_shape():
     b2.comments = [c.replace("LA(1.1,1.9,7)", "%&LS2CE2P") for c in b2.comments]
     assert casa_models(b2) == []                                   # region omitted, not silently wrong ...
     assert any("skipped" in s for s in describe_skips(b2))          # ... and the reason is reported
+
+
+# -- breadth checks added after validating against ~5000 regions of real files ---------------------------
+from fitstability import casa_lineshapes as _cl
+from fitstability.casa import CasaBackground, reconstruct_background, unreliable_shape, background_check
+from fitstability.vamas import read_vamas as _read
+
+
+def _shape_block(shape):
+    b = _make_block(0.0, "GL(30)")
+    b.comments = [c.replace("GL(30)", shape) for c in b.comments]
+    return b
+
+
+@pytest.mark.parametrize("shape", ["LS(1,1,50)", "QF(1,1,50,200)", "LSF(1,1,50,200)", "QA(1,1,5)", "QS(1,1,5)",
+                                   "GL(30)T(1.5)", "DS(0.1,50,5)", "GL(30)SL(1)", "E(1)SGL(30)"])
+def test_unreliable_shapes_are_refused_not_drawn_wrong(shape):
+    assert unreliable_shape(shape)
+    assert casa_models(_shape_block(shape)) == []
+
+
+@pytest.mark.parametrize("shape", ["GL(30)", "SGL(30)", "LA(1.1,1.9,7)", "LF(1,1,75,200)", "LA(50)", "DS(0.09,500)"])
+def test_validated_shapes_are_accepted(shape):
+    assert unreliable_shape(shape) is None
+
+
+def test_u3_tougaard_is_stored_like_u2_and_rebuilt_that_way():
+    x = np.linspace(0, 20, 201)
+    y = 100 + 400 * np.exp(-((x - 8) / 1.5) ** 2)
+    u2 = _cl.background("U 2 Tougaard", y, 2, x=x, params=(0, 0, 600.0, -300.0, 0.0, 0.0))
+    u3 = reconstruct_background("U 3 Tougaard", y, x, 2, (0, 0, 600.0, -300.0, 0.0, 0.0))
+    assert np.allclose(u2, u3) and u3.max() > y.min()
+    three = reconstruct_background("U 3 Tougaard", y, x, 2, (0, 0, 396.0, 551.0, 436.0, 0.0))   # D != 0: 3-parameter form
+    assert np.allclose(three, _cl.tougaard_3param(x, y, 396.0, 551.0, 436.0, 2, end_offset=0.0))
+
+
+def test_plain_tougaard_is_refused():
+    with pytest.raises(CasaFitError, match="plain 'Tougaard'"):
+        reconstruct_background("Tougaard", np.ones(30), np.arange(30.0), 1, (0, 0, 299, 542, 275, 0))
+    b = _make_block(0.0, "GL(30)", background="Tougaard")
+    assert casa_models(b) == [] and any("plain" in m for m in describe_skips(b))
+
+
+def test_library_spectrum_component_gets_a_clear_message():
+    b = _make_block(0.0, "GL(30)")
+    b.comments = [c.replace("GL(30)", "%&<>LS-CE4") for c in b.comments]
+    assert casa_models(b) == []
+    assert any("library-spectrum component" in m and "not in the file" in m for m in describe_skips(b))
+
+
+def test_tie_to_component_in_another_region_does_not_crash():
+    """Regression: an area tied to a component outside the region used to raise TypeError (fix_area)."""
+    b = _make_block(0.0, "GL(30)")
+    b.comments[-2] = b.comments[-2].replace("Area 450.0 1e-20 10000000.0 0 0.5", "Area 450.0 1e-20 10000000.0 7 0.5")
+    (m,) = casa_models(b)
+    p = {q.name: q for q in m.protocol.peaks}
+    assert p["partner"].area_tie is None and any("outside region" in n for n in m.notes)
+
+
+def test_blank_energy_axis_is_read_as_kinetic(tmp_path):
+    b = _make_block(0.0, "GL(30)")
+    f = tmp_path / "blank.vms"
+    write_vamas(f, [b])
+    text = f.read_bytes().decode("latin-1").replace("Kinetic Energy", "")
+    f.write_bytes(text.encode("latin-1"))
+    assert np.allclose(_read(f).blocks[0].be, b.be, atol=1e-6)
+
+
+def test_background_check_flags_a_wrong_background_and_passes_a_right_one():
+    b = _make_block(0.0, "GL(30)", background="Linear")
+    (ok,) = [c for c in background_check(b)]
+    assert ok.ok and ok.end_resid < 6
+    b2 = _make_block(0.0, "GL(30)", background="Linear")
+    b2.y = b2.y + 5000.0 * (b2.be > 535.0)                      # a step the stored background cannot follow
+    (bad,) = background_check(b2)
+    assert not bad.ok
+
+
+def test_reproduced_flag(tmp_path):
+    m = _model(tmp_path)
+    assert m.reproduced
+    m.rel_rms, m.rstd = 0.2, 10.0
+    assert not m.reproduced
