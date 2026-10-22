@@ -1,0 +1,8 @@
+{
+  "background": "shirley",
+  "peaks": [
+    {"name": "C1", "pos": 285.0, "fwhm": 1.3, "width_group": "main"},
+    {"name": "C2", "pos": 286.5, "fwhm": 1.3, "width_group": "main"},
+    {"name": "C3", "pos": 288.8, "fwhm": 1.3, "width_group": "main"}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "background": "shirley",
+  "count_scale": 1.0,
+  "peaks": [
+    {"name": "C1",  "pos": 285.0, "fwhm": 1.25},
+    {"name": "C2",  "pos": 286.5, "fwhm": 1.25},
+    {"name": "C3",  "pos": 288.5, "fwhm": 1.25},
+    {"name": "Sat", "pos": 291.5, "fwhm": 3.5}
+  ]
+}

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fitstability"
+version = "0.1.0"
+description = "Peak-fit stability diagnostics for XPS: multi-start box plots, Monte Carlo and uniqueness plots (after Moeini et al., J. Electron Spectrosc. Relat. Phenom. 250 (2021) 147094)."
+requires-python = ">=3.10"
+dependencies = ["numpy", "scipy", "matplotlib"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+fitstability = "fitstability.cli:main"
+
+[tool.setuptools]
+packages = ["fitstability"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
