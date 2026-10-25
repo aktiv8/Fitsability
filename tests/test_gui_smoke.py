@@ -176,3 +176,50 @@ def test_batch_and_theme_switch(app, win, tmp_path, monkeypatch):
     wait(app, win)
     assert len(shown["rows"]) == 1
     assert list(tmp_path.glob("*.boxplot.png"))
+
+
+# -- CasaXPS library-spectrum components ---------------------------------------------------------------
+def library_setup(tmp_path):
+    from test_library import make_block, make_reference
+    blk, _, _ = make_block()
+    f = tmp_path / "ce.vms"
+    write_vamas(f, [blk])
+    refs = tmp_path / "refs"
+    refs.mkdir()
+    for n, sh in (("LS-CE4", 0.0), ("LS-CE3", -3.0)):
+        r = make_reference(n, sh)
+        np.savetxt(refs / f"{n}.csv", np.c_[r.be, r.y], delimiter=",", header="be,counts", comments="")
+    return str(f), str(refs)
+
+
+def test_library_spectra_missing_then_supplied_then_calibrated(app, win, tmp_path):
+    f, refs = library_setup(tmp_path)
+    win.open_file(f)
+    assert win.table.rowCount() == 0 and "not loaded" in win.lbl_notes.text() and "LS-CE4" in win.lbl_notes.text()
+    win._add_reference_paths([refs])                      # the dialog buttons call this
+    assert len(win.library) == 2 and win.table.rowCount() == 2
+    assert any("not calibrated" in n for n in win.notes)
+    assert win.act_calibrate.isEnabled()
+    win.calibrate_references()
+    wait(app, win)
+    assert win.library.get("LS-CE4").origin == pytest.approx(899.1, abs=0.03)
+    assert "origin (eV)" in win.out.toPlainText()
+    assert win.casa_model is not None and win.casa_model.reproduced and win.casa_model.rel_rms < 0.01
+    win.run_box()
+    wait(app, win)
+    assert win.verdict is not None and win.panes[TAB_BOX].has_result
+
+
+def test_library_peak_in_table_resolves_by_name_and_survives_protocol_json(app, win, tmp_path):
+    f, refs = library_setup(tmp_path)
+    win.open_file(f)
+    win._add_reference_paths([refs])
+    assert not win.table.setData(win.table.index(0, 1), "%&<>LS-NOPE")                 # unknown reference refused
+    assert win.table.setData(win.table.index(0, 1), "LS-CE3")                          # short spelling resolves
+    assert win.table.peaks()[0].shape == "%&<>LS-CE3" and win.table.peaks()[0].reference is not None
+    pj = tmp_path / "p.json"
+    from fitstability import Protocol
+    save_protocol(pj, Protocol(win.table.peaks(), win.current_background()), None)
+    win.table.set_peaks([])
+    win.load_protocol(str(pj))
+    assert win.table.rowCount() == 2 and win.table.peaks()[0].reference is not None

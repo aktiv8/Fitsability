@@ -24,6 +24,7 @@ from ..experiments import (UNIQUENESS_METHOD_NOTE, monte_carlo, multistart, scan
                            unscannable_reason)
 from ..fit import fit, fit_nominal
 from ..io import load_protocol, save_protocol
+from ..library import ReferenceLibrary, calibrate_origins
 from ..model import FitProblem, PeakSpec, Protocol
 from ..vamas import VamasError, VamasFile, read_vamas
 from ..verdict import assess
@@ -74,6 +75,8 @@ class MainWindow(QMainWindow):
         self.display_start = None                 # parameters to draw in the spectrum tab
         self.notes: list[str] = []
         self._loading = False
+        self.library = ReferenceLibrary()         # reference spectra for CasaXPS library components
+        self.library_paths: list[str] = []
         # -- results ------------------------------------------------------------------------
         self.ms = self.verdict = self.mc = None
         self.uniq: list = []
@@ -85,6 +88,7 @@ class MainWindow(QMainWindow):
         self._build()
         self.apply_theme(self.theme_name)
         self._restore_settings()
+        self._restore_library()
         self._refresh_timer = QTimer(self, singleShot=True, interval=120)
         self._refresh_timer.timeout.connect(self.refresh_spectrum)
         self._update_actions()
@@ -195,6 +199,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_reset)
         ml.addLayout(top)
         self.table = PeakTableModel(self)
+        self.table.resolver = lambda shape: self.library.get(shape)
         self.view = QTableView()
         self.view.setModel(self.table)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -299,6 +304,12 @@ class MainWindow(QMainWindow):
         self.act_open = self._act(f, "&Open spectrum...", self.open_dialog, QKeySequence.Open)
         self.recent_menu = f.addMenu("Open &recent")
         f.addSeparator()
+        refs = f.addMenu("&Reference spectra (CasaXPS library)")
+        self._act(refs, "Add reference file(s)...", self.add_reference_files)
+        self._act(refs, "Add reference folder...", self.add_reference_folder)
+        self.act_calibrate = self._act(refs, "Calibrate origins from this file's Casa fit", self.calibrate_references)
+        self._act(refs, "Show loaded references", self.show_references)
+        self._act(refs, "Clear", self.clear_references)
         self._act(f, "Load protocol (JSON)...", self.load_protocol_dialog)
         self._act(f, "Save protocol (JSON)...", self.save_protocol_dialog)
         f.addSeparator()
@@ -358,6 +369,107 @@ class MainWindow(QMainWindow):
             v = self.settings.value(key)
             if v is not None:
                 w.setValue(int(v))
+
+    # ======================================================================================
+    # reference spectra for CasaXPS library components
+    # ======================================================================================
+    def _restore_library(self):
+        saved = self.settings.value("library_paths", [])
+        saved = [saved] if isinstance(saved, str) else list(saved or [])
+        saved = [p for p in saved if Path(p).exists()]
+        if saved:
+            try:
+                self._set_library(saved, reload=False)
+            except (ValueError, OSError):
+                self.library, self.library_paths = ReferenceLibrary(), []
+
+    def _set_library(self, paths: list[str], reload: bool = True):
+        lib = ReferenceLibrary.load(paths)
+        if not lib:
+            raise ValueError("no reference spectra found there (expected VAMAS files, or two-column text/CSV files)")
+        self.library, self.library_paths = lib, list(paths)
+        self.settings.setValue("library_paths", self.library_paths)
+        self.status.showMessage(f"{len(lib)} reference spectra loaded: {', '.join(lib.names()[:6])}"
+                                + (" ..." if len(lib) > 6 else ""), 8000)
+        if reload and self.block is not None:
+            self._reset_results()
+            self._load_block(self.block)
+        self._update_actions()
+
+    def add_reference_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Reference spectra", str(self.settings.value("last_dir", "")),
+                                                "Spectra (*.vms *.vamas *.csv *.txt *.dat *.asc);;All files (*)")
+        if paths:
+            self._add_reference_paths(paths)
+
+    def add_reference_folder(self):
+        d = QFileDialog.getExistingDirectory(self, "Folder of reference spectra", str(self.settings.value("last_dir", "")))
+        if d:
+            self._add_reference_paths([d])
+
+    def _add_reference_paths(self, paths: list[str]):
+        try:
+            self._set_library(list(dict.fromkeys(self.library_paths + [str(p) for p in paths])))
+        except (ValueError, OSError) as e:
+            self._error(str(e))
+
+    def clear_references(self):
+        self.library, self.library_paths = ReferenceLibrary(), []
+        self.settings.setValue("library_paths", [])
+        if self.block is not None:
+            self._reset_results()
+            self._load_block(self.block)
+        self._update_actions()
+
+    def show_references(self):
+        if not self.library:
+            QMessageBox.information(self, "Reference spectra", "None loaded. A CasaXPS library component (shape %&<>LS-...) "
+                                    "needs its reference spectrum: File > Reference spectra > Add.")
+            return
+        lines = []
+        for n in self.library.names():
+            r = self.library.get(n)
+            o = f"origin {r.origin:.3f} eV" if r.calibrated else f"origin not calibrated (maximum at {r.max_energy:.2f} eV)"
+            lines.append(f"{n}: {r.be.min():.1f}-{r.be.max():.1f} eV, {o}   [{r.source}]")
+        QMessageBox.information(self, "Reference spectra", "\n".join(lines))
+
+    def calibrate_references(self):
+        """Fit each reference's origin to the CasaXPS fits stored in the open VAMAS file."""
+        if self.vamas is None or not self.library or self._busy():
+            return
+        blocks = [b for b in self.vamas.blocks if (f := parse_fit(b.comments)) and f.comps][:80]
+        lib, units = self.library, self._units_name()
+
+        def job(progress, cancel):
+            return calibrate_origins(lib, blocks, units, progress=progress, cancel=cancel)
+
+        def done(fits):
+            if not fits:
+                self._error("No region of this file uses the loaded reference spectra.")
+                return
+            lines = ["Reference origins fitted to CasaXPS's saved fits", f"{'reference':<22}{'regions':>8}{'origin (eV)':>14}"
+                     f"{'spread':>9}{'rel rms before':>16}{'after':>9}"]
+            for n, f in sorted(fits.items()):
+                lines.append(f"{n:<22}{len(f.values):>8}{f.median:>14.3f}{f.spread:>9.3f}{f.rel_before:>16.3f}{f.rel_after:>9.3f}"
+                             + ("   <- spread is large: not a fixed offset" if f.spread > 0.15 and len(f.values) > 2 else ""))
+            report = "\n".join(lines)
+            lib.set_origins({n: f.median for n, f in fits.items()})
+            folders = [Path(p) for p in self.library_paths if Path(p).is_dir()]
+            dest = (folders[0] if folders else Path(self.library_paths[0]).parent) / "origins.json"
+            save = False
+            if not os.environ.get("FITSTABILITY_NO_DIALOGS"):
+                save = QMessageBox.question(self, "Reference spectra", f"Save these origins to {dest}?\n(read again whenever "
+                                            "these reference spectra are loaded)") == QMessageBox.Yes
+            if save:
+                import json
+                existing = json.loads(dest.read_text(encoding="utf-8")) if dest.exists() else {}
+                existing.update({n: round(f.median, 4) for n, f in fits.items()})
+                dest.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+            if self.block is not None:
+                self._reset_results()
+                self._load_block(self.block)
+            self.out.setPlainText(report)               # after the reload, which clears the results pane
+        self._start("Calibrating reference origins", job, done)
 
     def closeEvent(self, ev):
         if self.worker is not None and self.worker.isRunning():
@@ -496,7 +608,7 @@ class MainWindow(QMainWindow):
         self.casa, self.casa_model, self.casa_bg = [], None, None
         if cf and cf.comps:
             try:
-                self.casa = casa_models(b, self._units_name())
+                self.casa = casa_models(b, self._units_name(), library=self.library)
             except (CasaFitError, ValueError) as e:
                 self.casa = []
                 self.notes = [str(e)]
@@ -668,7 +780,7 @@ class MainWindow(QMainWindow):
 
     def load_protocol(self, path: str):
         try:
-            proto, cs = load_protocol(path)
+            proto, cs = load_protocol(path, self.library)
         except (ValueError, OSError, KeyError) as e:
             self._error(f"Cannot load {Path(path).name}:\n{e}")
             return
@@ -750,6 +862,7 @@ class MainWindow(QMainWindow):
         self.act_csv.setEnabled(self.ms is not None)
         self.act_report.setEnabled(self.ms is not None or self.mc is not None or bool(self.uniq))
         self.act_batch.setEnabled(self.vamas is not None and not self._busy())
+        self.act_calibrate.setEnabled(self.vamas is not None and bool(self.library) and not self._busy())
 
     def _seed(self):
         return self.seed.value() if self.use_seed.isChecked() else None
@@ -927,7 +1040,7 @@ class MainWindow(QMainWindow):
                                                   str(Path(self.path).parent))
         n, seed, bf = self.n_starts.value(), self._seed(), self.bounds_fraction.value()
         rp, rf = self.rand_pos.value(), self.rand_fwhm.value()
-        units, vf, stem = self._units_name(), self.vamas, Path(self.path).stem
+        units, vf, stem, lib = self._units_name(), self.vamas, Path(self.path).stem, self.library
         blocks = [b for b in vf.blocks if (f := parse_fit(b.comments)) and f.comps]
         if not blocks:
             self._error("No block in this file has a CasaXPS fit")
@@ -941,7 +1054,7 @@ class MainWindow(QMainWindow):
                     from ..experiments import Cancelled
                     raise Cancelled()
                 try:
-                    models = casa_models(b, units)
+                    models = casa_models(b, units, library=lib)
                 except (CasaFitError, ValueError) as e:
                     skipped.append(f"{b.label}: {e}")
                     continue

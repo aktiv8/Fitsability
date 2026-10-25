@@ -119,7 +119,7 @@ def read_spectrum(path, xcol: int = 0, ycol: int = 1, delimiter: str | None | bo
 
 
 # -- protocols -------------------------------------------------------------------------------
-def _protocol_from_cfg(cfg: dict) -> tuple[Protocol, float | None]:
+def _protocol_from_cfg(cfg: dict, library=None) -> tuple[Protocol, float | None]:
     peaks = []
     for d in cfg["peaks"]:
         bad = set(d) - _PEAK_FIELDS
@@ -134,6 +134,8 @@ def _protocol_from_cfg(cfg: dict) -> tuple[Protocol, float | None]:
         if "area_bounds" in d:
             lo, hi = d["area_bounds"]
             d["area_bounds"] = (0.0 if lo is None else lo, math.inf if hi is None else hi)
+        if library is not None and str(d.get("shape", "")).startswith("%&"):
+            d["reference"] = library.get(d["shape"])
         peaks.append(PeakSpec(**d))
     bg = cfg.get("background", "shirley")
     if isinstance(bg, dict):
@@ -143,9 +145,12 @@ def _protocol_from_cfg(cfg: dict) -> tuple[Protocol, float | None]:
     return Protocol(peaks, bg), (float(cs) if cs is not None else None)
 
 
-def load_protocol(path) -> tuple[Protocol, float | None]:
-    """Single-protocol JSON. Returns (protocol, count_scale or None if not given)."""
-    return _protocol_from_cfg(json.loads(Path(path).read_text()))
+def load_protocol(path, library=None) -> tuple[Protocol, float | None]:
+    """Single-protocol JSON. Returns (protocol, count_scale or None if not given).
+
+    ``library`` (a :class:`~fitstability.library.ReferenceLibrary`) supplies the reference spectra of any
+    CasaXPS library-spectrum shapes (``%&<>LS-...``) the protocol uses."""
+    return _protocol_from_cfg(json.loads(Path(path).read_text()), library)
 
 
 def protocol_to_cfg(protocol: Protocol, count_scale: float | None = None) -> dict:
@@ -203,11 +208,11 @@ class ProtocolSet:
         return self.default
 
 
-def load_protocols(path) -> ProtocolSet:
+def load_protocols(path, library=None) -> ProtocolSet:
     cfg = json.loads(Path(path).read_text())
     if "protocols" in cfg:
-        return ProtocolSet(by_region={ProtocolSet._key(k): _protocol_from_cfg(v) for k, v in cfg["protocols"].items()})
-    return ProtocolSet(default=_protocol_from_cfg(cfg))
+        return ProtocolSet(by_region={ProtocolSet._key(k): _protocol_from_cfg(v, library) for k, v in cfg["protocols"].items()})
+    return ProtocolSet(default=_protocol_from_cfg(cfg, library))
 
 
 def synthetic_spectrum(peaks: list[tuple[float, float, float]], x=None, bg=(200.0, 800.0),

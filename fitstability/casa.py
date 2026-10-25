@@ -287,11 +287,15 @@ def _unique_names(comps) -> list[str]:
 RELAX_AREA_BOUNDS_ABOVE = 0.15      # rel. rms of the stored fit above which area units are not trusted
 
 
-def casa_models(block, area_units: str = "counts", regions: list[str] | None = None) -> list[CasaModel]:
+def casa_models(block, area_units: str = "counts", regions: list[str] | None = None, library=None) -> list[CasaModel]:
     """One :class:`CasaModel` per CasaXPS region of a VAMAS block that holds a fit.
 
     ``area_units``: ``"counts"`` (default) if the ordinate is counts, so stored areas (counts/s x eV)
     are multiplied by dwell x scans; ``"cps"`` if it is already counts per second.
+
+    ``library`` is a :class:`~fitstability.library.ReferenceLibrary` supplying the reference spectra of
+    CasaXPS library-spectrum components (shape ``%&<>LS-...``); without it (or without the right
+    reference) a region using one is skipped, with the names it needs.
 
     Each model carries how well CasaXPS's saved fit reproduces the data (``rel_rms``, ``rstd``). If it
     does not (relative rms above 0.15, or the envelope more than 3x the data), the stored areas are
@@ -321,7 +325,7 @@ def casa_models(block, area_units: str = "counts", regions: list[str] | None = N
         if not comps:
             continue
         try:
-            models.append(_build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k,
+            models.append(_build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library,
                                  1.0 if area_units == "counts" else (block.dwell_s * block.scans if block.dwell_s and block.scans else 1.0)))
         except CasaFitError as e:
             fit.skipped.append((reg.name, str(e)))
@@ -335,11 +339,10 @@ def describe_skips(block) -> list[str]:
     return [f"region {r!r} skipped: {why}" for r, why in getattr(block, "_casa_skipped", [])]
 
 
-def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0) -> CasaModel:
+def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library, count_scale=1.0) -> CasaModel:
     for c in comps:
         if c.shape.startswith("%&"):
-            raise CasaFitError(f"{c.name} is a CasaXPS library-spectrum component ({c.shape[2:].lstrip('<>')}): "
-                               "its line shape is held in CasaXPS's library, not in the file, so it cannot be rebuilt")
+            continue                                       # library spectrum: resolved below
         bad = cl.check_shape(c.shape)
         why = unreliable_shape(c.shape)
         if why:
@@ -351,6 +354,13 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0)
                 bad = [f"cannot be evaluated ({e})"]
         if bad:
             raise CasaFitError(f"{c.name} has line shape {c.shape!r}: " + "; ".join(bad))
+    lib_shapes = [c.shape for c in comps if c.shape.startswith("%&")]
+    if lib_shapes:
+        need = library.missing(lib_shapes) if library is not None else sorted({s.lstrip("%&<>") for s in lib_shapes})
+        if need:
+            raise CasaFitError("uses CasaXPS library spectra that are not loaded: " + ", ".join(need) +
+                               ". They live in CasaXPS's library, not in the file: supply them as reference spectra "
+                               "(--library, or Reference spectra... in the GUI)")
     ids = {c.index: i for i, c in enumerate(comps)}
     names = _unique_names(comps)
     peaks, notes, approx = [], [], []
@@ -376,9 +386,15 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, count_scale=1.0)
         if c.fwhm.fixed:
             kw["fix_fwhm"] = True
         kw["fwhm_bounds"] = (max(c.fwhm.lo, 1e-3), max(c.fwhm.hi, c.fwhm.lo, 1e-3 * 2))
+        if c.shape.startswith("%&"):
+            ref = library.get(c.shape)
+            kw["reference"], kw["fix_fwhm"], kw["fwhm_tie"] = ref, True, None   # width is not a parameter of a library shape
+            if not ref.calibrated and "uncalibrated" not in "".join(notes):
+                notes.append("library spectrum origin not calibrated: assumed at each reference's maximum "
+                             "(run `fitstability library calibrate` on a file Casa fitted with them)")
         kw["area_bounds"] = (max(c.area.lo, 0.0) * k, c.area.hi * k)
         peaks.append(PeakSpec(name=names[len(peaks)], pos=pos_be, fwhm=c.fwhm.value, shape=c.shape, **kw))
-        if not cl.is_exact(c.shape) and c.shape.split("(")[0] not in approx:
+        if not c.shape.startswith("%&") and not cl.is_exact(c.shape) and c.shape.split("(")[0] not in approx:
             approx.append(c.shape.split("(")[0])
     if approx:
         notes.append(f"{'/'.join(approx)} line shapes are reconstructions of CasaXPS's, not its own code (GL/SGL are exact)")

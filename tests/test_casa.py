@@ -179,11 +179,11 @@ def test_plain_tougaard_is_refused():
     assert casa_models(b) == [] and any("plain" in m for m in describe_skips(b))
 
 
-def test_library_spectrum_component_gets_a_clear_message():
+def test_library_spectrum_without_reference_gets_a_clear_message():
     b = _make_block(0.0, "GL(30)")
     b.comments = [c.replace("GL(30)", "%&<>LS-CE4") for c in b.comments]
     assert casa_models(b) == []
-    assert any("library-spectrum component" in m and "not in the file" in m for m in describe_skips(b))
+    assert any("LS-CE4" in m and "not loaded" in m and "--library" in m for m in describe_skips(b))
 
 
 def test_tie_to_component_in_another_region_does_not_crash():

@@ -19,6 +19,8 @@ class PeakSpec:
 
     ``shape`` is empty for the built-in pseudo-Voigt (``eta`` = Lorentzian fraction) or a
     CasaXPS line-shape string such as ``"GL(30)"``, ``"LA(1.53,243)"`` or ``"LF(1,1,75,200)"``.
+    A shape starting ``%&`` is a CasaXPS library spectrum: ``reference`` must hold its
+    :class:`~fitstability.library.ReferenceSpectrum` (the FWHM is then unused).
 
     Constraints (a constrained parameter is not a free fit parameter):
 
@@ -47,6 +49,8 @@ class PeakSpec:
     fwhm_bounds: tuple[float, float] = (0.01, 6.0)
     area_bounds: tuple[float, float] = (0.0, float("inf"))
     pos_halfwindow: float = 3.0  # eV, used when pos_bounds is None
+    # the reference spectrum of a CasaXPS library component (shape '%&<>LS-CE4'); see fitstability.library
+    reference: object = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -92,6 +96,9 @@ class Protocol:
         self.background = background
         self._index = {n: i for i, n in enumerate(names)}
         for p in self.peaks:
+            if p.shape.startswith("%&") and p.reference is None:
+                raise ValueError(f"{p.name}: the reference spectrum {p.shape.lstrip('%&<>')!r} is not loaded "
+                                 "(supply it with --library, or Reference spectra... in the GUI)")
             for kind in ("area_tie", "fwhm_tie", "pos_tie"):
                 t = getattr(p, kind)
                 if t is not None and t[0] not in self._index:
@@ -266,7 +273,9 @@ class FitProblem:
 
 
 def peak_curve(x, spec: PeakSpec, pos, fwhm, area):
-    """The peak on ``x`` (ascending): built-in pseudo-Voigt, or a CasaXPS line shape."""
+    """The peak on ``x`` (ascending): built-in pseudo-Voigt, a CasaXPS line shape, or a library spectrum."""
+    if spec.reference is not None:
+        return spec.reference.curve(x, pos, area)
     if spec.shape:
         return casa_curve(x, spec.shape, pos, fwhm, area)
     return pseudo_voigt(x, pos, fwhm, area, spec.eta)
@@ -274,6 +283,8 @@ def peak_curve(x, spec: PeakSpec, pos, fwhm, area):
 
 def unit_height(spec: PeakSpec, pos: float, fwhm: float) -> float:
     """Maximum of the peak when its area is 1."""
+    if spec.reference is not None:
+        return float(spec.reference.unit.max())
     if not spec.shape:
         return float(peak_height_per_area(fwhm, spec.eta))
     grid = np.linspace(pos - 12 * fwhm, pos + 12 * fwhm, 1201)  # uniform, as the Casa shapes need

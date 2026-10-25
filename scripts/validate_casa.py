@@ -25,6 +25,7 @@ import numpy as np
 
 from fitstability import read_vamas
 from fitstability.casa import CasaFitError, background_check, casa_models, describe_skips, parse_fit
+from fitstability.library import ReferenceLibrary, calibrate_origins
 
 TOL_OK = 0.03          # rel rms below which a region counts as reproduced ...
 TOL_RSTD = 2.0         # ... or Poisson-weighted RSTD below this (rel rms is noise-dominated for weak spectra)
@@ -58,7 +59,7 @@ def collect(paths):
     return files
 
 
-def run(files):
+def run(files, library=None):
     rows, skips, unread = [], collections.Counter(), collections.Counter()
     run.bgchecks = []
     for f in files:
@@ -76,7 +77,7 @@ def run(files):
             run.bgchecks += background_check(b)
             bgs = sorted({r.background for r in fit.regions}) or ["?"]
             try:
-                models = casa_models(b)
+                models = casa_models(b, library=library)
             except CasaFitError as e:
                 skips[re.sub(r"[-\d.]+", "#", str(e).split(": ", 1)[-1])[:90]] += 1
                 continue
@@ -148,6 +149,10 @@ def main(argv=None):
     ap.add_argument("sources", nargs="+", help="globs (recursive) or @listfile")
     ap.add_argument("--csv", help="write every region to this CSV")
     ap.add_argument("--worst", type=int, default=15)
+    ap.add_argument("--library", action="append", metavar="PATH",
+                    help="reference spectra (files/folders) for CasaXPS library components; without them those regions are skipped")
+    ap.add_argument("--calibrate", action="store_true",
+                    help="first fit each reference's origin to the saved fits in these files (median over regions)")
     args = ap.parse_args(argv)
     paths = []
     for s in args.sources:
@@ -157,7 +162,23 @@ def main(argv=None):
             paths += glob.glob(s, recursive=True)
     files = collect(sorted(set(paths)))
     print(f"{len(paths)} paths, {len(files)} distinct files")
-    rows, skips, unread = run(files)
+    lib = None
+    if args.library:
+        lib = ReferenceLibrary.load(args.library)
+        print(f"{len(lib)} reference spectra: {', '.join(lib.names())}")
+        if args.calibrate:
+            blocks = []
+            for f in files:
+                try:
+                    blocks += [b for b in read_vamas(f).blocks if (fit := parse_fit(b.comments)) and any(c.shape.startswith("%&") for c in fit.comps)]
+                except Exception:  # noqa: BLE001
+                    continue
+            fits = calibrate_origins(lib, blocks)
+            lib.set_origins({n: f.median for n, f in fits.items()})
+            for n, f in sorted(fits.items()):
+                print(f"  origin {n:<20}{f.median:>9.3f} eV  spread {f.spread:.3f}  regions {len(f.values)}  "
+                      f"rel rms {f.rel_before:.3f} -> {f.rel_after:.3f}")
+    rows, skips, unread = run(files, lib)
     report(rows, skips, unread, args.worst)
     if args.csv and rows:
         with open(args.csv, "w", newline="", encoding="utf-8") as fh:

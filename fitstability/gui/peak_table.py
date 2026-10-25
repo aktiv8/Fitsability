@@ -13,7 +13,8 @@ from . import protocol_model as pm
 COLUMNS = ["Name", "Shape", "Position (eV)", "Position rule", "FWHM (eV)", "FWHM rule", "Area rule",
            "Pos min", "Pos max", "FWHM min", "FWHM max"]
 _TIPS = {
-    1: "Empty = pseudo-Voigt. Or a CasaXPS shape: GL(30), SGL(30), LA(1.1,1.9,7), LF(1,1,75,200)...",
+    1: "Empty = pseudo-Voigt. Or a CasaXPS shape: GL(30), SGL(30), LA(1.1,1.9,7), LF(1,1,75,200)... "
+       "or a loaded reference spectrum: %&<>LS-CE4",
     3: pm.RULE_HELP["pos"], 5: pm.RULE_HELP["fwhm"], 6: pm.RULE_HELP["area"],
     7: "Lower bound of the position (empty = nominal - 3 eV)", 8: "Upper bound of the position (empty = nominal + 3 eV)",
     9: "Lower bound of the FWHM", 10: "Upper bound of the FWHM",
@@ -29,6 +30,7 @@ class PeakTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._peaks: list[PeakSpec] = []
+        self.resolver = None        # callable(shape) -> ReferenceSpectrum | None, for CasaXPS library shapes (%&<>LS-...)
 
     # -- API used by the window -------------------------------------------------------------
     def peaks(self) -> list[PeakSpec]:
@@ -150,7 +152,14 @@ class PeakTableModel(QAbstractTableModel):
                 raise ValueError("value must be finite")
             return v
         if c == 1:
-            return dict(shape="" if text.lower() in ("", "pv", "pseudo-voigt") else text)
+            if text.startswith("%&") or text.upper().startswith("LS-"):
+                shape = text if text.startswith("%&") else "%&<>" + text
+                ref = self.resolver(shape) if self.resolver else None
+                if ref is None:
+                    raise ValueError(f"the reference spectrum {shape.lstrip('%&<>')!r} is not loaded "
+                                     "(File > Reference spectra...)")
+                return dict(shape=shape, reference=ref, fix_fwhm=True, fwhm_tie=None, width_group="")
+            return dict(shape="" if text.lower() in ("", "pv", "pseudo-voigt") else text, reference=None)
         if c == 2:
             return dict(pos=num())
         if c == 4:

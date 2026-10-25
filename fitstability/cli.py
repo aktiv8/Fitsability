@@ -17,6 +17,7 @@ from . import (FitProblem, UNIQUENESS_METHOD_NOTE, assess, fit_nominal, load_pro
                unscannable_reason)
 from .model import PeakSpec, Protocol
 from .casa import CasaFitError, casa_models, describe_skips
+from .library import ReferenceLibrary, calibrate_origins
 from .vamas import VamasError
 
 VAMAS_SUFFIXES = {".vms", ".vamas", ".vam"}
@@ -28,7 +29,8 @@ def _items(args):
     With a protocol file the same protocol(s) are applied; without one the CasaXPS fit stored in
     each VAMAS block is used (every region of it)."""
     src = Path(args.source)
-    protos = load_protocols(args.protocol) if args.protocol else None
+    lib = _library(args)
+    protos = load_protocols(args.protocol, lib) if args.protocol else None
     if src.suffix.lower() in VAMAS_SUFFIXES:
         vf = read_vamas(src)
         blocks = vf.select(args.block)
@@ -38,7 +40,7 @@ def _items(args):
             tag0 = re.sub(r"[^A-Za-z0-9]+", "_", f"{b.index}_{b.region}").strip("_")
             if protos is None:
                 try:
-                    models = casa_models(b, args.count_units)
+                    models = casa_models(b, args.count_units, library=lib)
                 except CasaFitError as e:
                     print(f"skipping {b.label}: {e}")
                     continue
@@ -63,6 +65,16 @@ def _items(args):
         yield "", src.name, FitProblem(x, y, proto, args.count_scale or cs or 1.0), None
 
 
+def _library(args):
+    paths = getattr(args, "library", None)
+    if not paths:
+        return None
+    lib = ReferenceLibrary.load(paths, args.library_axis, args.library_hv)
+    if not lib:
+        raise ValueError("no reference spectra found in " + ", ".join(paths))
+    return lib
+
+
 class _Anon:
     region = block_id = ""
     label = "spectrum"
@@ -80,6 +92,43 @@ def _out_path(args, tag: str, kind: str) -> str:
         p = base / name
     p.parent.mkdir(parents=True, exist_ok=True)
     return str(p)
+
+
+def cmd_library_list(args):
+    lib = _library(args)
+    if lib is None:
+        sys.exit("give --library PATH (a file or folder of reference spectra)")
+    print(f"{len(lib)} reference spectra:")
+    for n in lib.names():
+        r = lib.get(n)
+        o = f"origin {r.origin:.3f} eV" if r.calibrated else f"origin not calibrated (maximum at {r.max_energy:.2f} eV)"
+        print(f"  {n:<24}{r.be.min():.1f}-{r.be.max():.1f} eV  {o}  [{r.source}]")
+
+
+def cmd_library_calibrate(args):
+    import json
+    lib = _library(args)
+    if lib is None:
+        sys.exit("give --library PATH (a file or folder of reference spectra)")
+    vf = read_vamas(args.source)
+    blocks = vf.select(args.block)
+    fits = calibrate_origins(lib, blocks, args.count_units)
+    if not fits:
+        sys.exit(f"no region of {Path(args.source).name} uses the loaded reference spectra: {', '.join(lib.names())}")
+    print(f"Origins fitted to CasaXPS's saved fits in {Path(args.source).name} ({len(blocks)} blocks searched)\n")
+    print(f"{'reference':<22}{'regions':>8}{'origin (eV)':>14}{'spread':>9}{'rel rms before':>16}{'after':>9}")
+    for n, f in sorted(fits.items()):
+        flag = "   <- spread is large: not a fixed offset" if f.spread > 0.15 and len(f.values) > 2 else ""
+        print(f"{n:<22}{len(f.values):>8}{f.median:>14.3f}{f.spread:>9.3f}{f.rel_before:>16.3f}{f.rel_after:>9.3f}{flag}")
+    if args.write:
+        dest = Path(args.write)
+        dest = dest / "origins.json" if dest.is_dir() else dest
+        existing = json.loads(dest.read_text(encoding="utf-8")) if dest.exists() else {}
+        existing.update({n: round(f.median, 4) for n, f in fits.items()})
+        dest.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        print(f"\nWrote {dest}")
+    else:
+        print("\nRe-run with --write FOLDER to save these origins beside the reference spectra.")
 
 
 def cmd_list(args):
@@ -179,6 +228,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="fitstability", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    def add_library(p):
+        p.add_argument("--library", action="append", metavar="PATH",
+                       help="reference spectra for CasaXPS library components (%%&<>LS-...): a file or folder of VAMAS or "
+                            "two-column text files (repeatable); an origins.json beside them gives calibrated origins")
+        p.add_argument("--library-axis", choices=["binding", "kinetic"], default="binding",
+                       help="energy axis of text-file references (VAMAS files state their own)")
+        p.add_argument("--library-hv", type=float, default=None, help="photon energy, for kinetic-energy text references")
+
     def common(p):
         p.add_argument("source", help="VAMAS file (.vms) or two-column text/CSV: binding energy, intensity")
         p.add_argument("protocol", nargs="?", default=None,
@@ -188,6 +245,7 @@ def main(argv=None):
         p.add_argument("--count-units", choices=["counts", "cps"], default="counts",
                        help="VAMAS ordinate units for the Poisson weights: counts (default) or counts/s (x dwell x scans)")
         p.add_argument("--count-scale", type=float, default=0.0, help="counts per y unit; overrides --count-units")
+        add_library(p)
         p.add_argument("--seed", type=int, default=None)
         p.add_argument("--jobs", type=int, default=1)
         p.add_argument("--out", help="figure file (one block) or folder; default: next to the source")
@@ -195,6 +253,18 @@ def main(argv=None):
     p = sub.add_parser("list", help="list the blocks in a VAMAS file")
     p.add_argument("source")
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("library-list", help="list the reference spectra found by --library")
+    add_library(p)
+    p.set_defaults(func=cmd_library_list)
+
+    p = sub.add_parser("library-calibrate", help="fit the origin of each reference spectrum to CasaXPS's saved fits")
+    p.add_argument("source", help="a VAMAS file fitted in CasaXPS with those library components")
+    add_library(p)
+    p.add_argument("--block", help="VAMAS blocks to use (default: all)")
+    p.add_argument("--count-units", choices=["counts", "cps"], default="counts")
+    p.add_argument("--write", metavar="FOLDER_OR_FILE", help="write/update origins.json here")
+    p.set_defaults(func=cmd_library_calibrate)
 
     p = sub.add_parser("boxplot", help="multi-start box-plot test (the paper's method)")
     common(p)
