@@ -6,17 +6,19 @@ reference itself lives in CasaXPS's library, not in the VAMAS file, so it has to
 
 Supply them as files or folders (:meth:`ReferenceLibrary.load`):
 
-* VAMAS files: every block is a reference, named by its block id (and sample id, if different);
+* VAMAS files: every block is a reference, named by its block id (and sample id, if different). A CasaXPS
+  data file that carries its own library spectra as blocks named ``%&<>LS-...`` supplies just those;
 * two-column text/CSV files: named by the file name (``LS-CE4.csv`` -> ``LS-CE4``).
 
 Names match the way CasaXPS writes them: ``LS-CE4``, ``%&<>LS-CE4`` and ``CE4`` are the same
 reference, case and punctuation ignored. References should already be background-subtracted.
 
-**Origin.** CasaXPS pins a library spectrum at ``Position`` by some reference energy of the spectrum
-(its maximum? a stored offset?) that the VAMAS file does not state. Each reference therefore carries an
-``origin``: the energy on its own axis that sits at the component's Position. ``None`` means "the
-maximum of the reference" (a guess, flagged in the model notes). :func:`calibrate_origins` finds the
-real value by fitting it to CasaXPS's own saved fits, which are in the file; the result is written to
+**Origin.** CasaXPS pins a library spectrum at ``Position`` by some reference energy of the spectrum that
+the VAMAS file does not state. Each reference carries an ``origin``: the energy on its own axis that sits at
+the component's Position. ``None`` means the maximum of the reference, which is what CasaXPS does: checked
+on the Ce 3d references LS-CE4 and LS-CE3 against 101 saved CasaXPS fits, the fitted origins were the
+maxima to within 0.02 eV with no spread. For a reference where that is not so, :func:`calibrate_origins`
+finds the origin by fitting it to CasaXPS's own saved fits (which are in the file); the result is written to
 ``origins.json`` beside the references and read back on the next load.
 """
 from __future__ import annotations
@@ -111,6 +113,14 @@ class ReferenceLibrary:
     def get(self, name: str) -> ReferenceSpectrum | None:
         return self._items.get(reference_key(name))
 
+    def over(self, other: "ReferenceLibrary | None") -> "ReferenceLibrary":
+        """This library with ``other``'s references as fall-backs: a name found here wins."""
+        if other is None or not other:
+            return self
+        out = ReferenceLibrary()
+        out._items = {**other._items, **self._items}
+        return out
+
     def missing(self, shapes) -> list[str]:
         """The distinct library-spectrum names among ``shapes`` that are not loaded."""
         out = []
@@ -168,8 +178,14 @@ class ReferenceLibrary:
                 vf = read_vamas(f)
             except VamasError:
                 return                                   # not a spectrum file: ignore silently
-            for b in vf.blocks:
+            blocks = vf.blocks
+            marked = [b for b in blocks if b.block_id.strip().startswith("%&")]
+            if marked:                       # a CasaXPS data file that carries its own library spectra (as %&<>LS-... blocks)
+                blocks = marked
+            for b in blocks:
                 names = [n for n in dict.fromkeys([b.block_id.strip(), b.sample_id.strip()]) if n and n != "Not Specified"]
+                if marked:
+                    names = names[:1]
                 for n in names:
                     try:
                         self.add(ReferenceSpectrum(n, b.be, b.y, None, f"{f.name} block {b.index}"))

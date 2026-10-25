@@ -94,29 +94,33 @@ reference combined that way, and no other constraint form occurs. Lower = upper 
 - **Check:** each region reports how well CasaXPS's saved fit reproduces the data (`rel_rms`, `RSTD`,
   `CasaModel.reproduced`), with a note when it does not. `scripts/validate_casa.py` runs this over many files.
   On the 509 distinct Casa-fitted VAMAS files found on the author's local drives (the 4,254 cloud-only OneDrive
-  files were left untouched), 5,156 regions were rebuilt and **97.9 %** reproduce the saved fit (rms residual
+  files were left untouched), 5,722 regions were rebuilt and **97.9 %** reproduce the saved fit (rms residual
   under 3 % of the data range, or Poisson-weighted RSTD under 2): Shirley 98 %, U 2 Tougaard 96 %, Linear 99 %;
-  LA 98 %, GL 98 %, LF 97 %. 1,621 further regions were skipped as above, 1,466 of them for library-spectrum
-  components (Ce 3d, Sb 3d, Ni 2p...). Where a saved fit does not reproduce (about 47 regions: files edited after fitting,
+  LA 98 %, GL 98 %, LF 98 %, library spectra 98 %. About 170 further regions were skipped as above (plain Tougaard,
+  the refused shape families, a few missing library references). Where a saved fit does not reproduce (about 47 regions: files edited after fitting,
   areas in other units, LA with an unusual third parameter) the areas are rescaled if that fixes it, else the area
   bounds are opened and only the tie ratios are used. U 3 Tougaard is the least evidenced: 14 regions reproduced
   fully, and its reconstruction meets the data at both ends in about 80 % of 549 regions (the rest weak, noisy spectra).
 - **CasaXPS library-spectrum components** (shape `%&<>LS-CE4`) are measured or computed reference spectra
-  held in CasaXPS's library, not in the VAMAS file, so you supply them: `--library PATH` (repeatable) with a
-  file or folder of VAMAS files (each block a reference, named by its block id) or two-column text/CSV files
-  (named by file name; `--library-axis kinetic --library-hv 1486.68` for kinetic-energy text). Names match
-  loosely (`LS-CE4`, `%&<>LS-CE4`, `ce4`). References should already be background-subtracted. Without them
-  a region is skipped and the missing names are printed. In the GUI: *File > Reference spectra*.
-  CasaXPS pins a reference at the component's Position by an energy the file does not state, so each
-  reference has an **origin**; until it is known it is assumed at the reference's maximum and the model says so.
-  Fit it to CasaXPS's own saved fits (which are in the file):
-  `fitstability library-calibrate file.vms --library refs --write refs` (or *Calibrate origins* in the GUI)
-  writes `refs/origins.json`, read back on every later load; a large printed spread means the offset is
-  not constant for that reference. `fitstability library-list --library refs` shows what is loaded.
-  The width is not a parameter of a library shape, so it is shown fixed. This is tested on synthetic
-  references only (origin recovered to 0.03 eV even 16 eV from the maximum); it has **not** yet been run on
-  the real CasaXPS Ce 3d references, and `scripts/validate_casa.py --library refs --calibrate` does that
-  over a corpus once they are available.
+  from CasaXPS's library. CasaXPS saves the ones a fit uses as extra blocks named `%&<>LS-CE4` in the same
+  VAMAS file, and those are **used automatically**: nothing to supply. For a file that lacks them, supply
+  the references: `--library PATH` (repeatable) with a file or folder of VAMAS files (a CasaXPS data file
+  that carries `%&<>LS-...` blocks supplies just those) or two-column text/CSV files (named by file name;
+  `--library-axis kinetic --library-hv 1486.68` for kinetic-energy text). In the GUI: *File > Reference
+  spectra*. Names match loosely (`LS-CE4`, `%&<>LS-CE4`, `ce4`); references should be background-subtracted;
+  a reference you supply wins over a stored one. A region whose references are in neither is skipped and
+  the missing names printed. The width is not a parameter of a library shape, so it is shown fixed.
+  CasaXPS pins a reference at the component's Position by its maximum: fitted to 101 saved Ce 3d fits
+  (LS-CE4 and LS-CE3) the origin came out at the reference maxima to within 0.02 eV with no spread. Each
+  reference nevertheless carries an `origin` (default: the maximum) and `fitstability library-calibrate
+  file.vms --library refs --write refs` (or *Calibrate origins* in the GUI) fits it to CasaXPS's own saved
+  fits for a reference where that is not so, writing `refs/origins.json`, which is read on every later
+  load. `fitstability library-list --library refs` shows what is loaded. On the 39 distinct local files that
+  use library components, 98.5 % of 1,794 regions reproduce the saved fit (library-only regions: 731, 98 %);
+  the references of some files (a Mo 3d, CeO2 and Ru 3p library) are in no file here and stay skipped.
+- **Segmented regions:** neighbouring CasaXPS regions of one name (windows touching, gap at most 0.25 eV) are
+  one region with one background per segment, as CasaXPS draws them; they are analysed as one region
+  (a narrower region inside a wider one of the same name is a duplicate and dropped).
 - **Starts:** by default the Casa fit's own positions and widths are the nominal start, so only the areas
   are random (the paper's protocol). Casa's saved values are usually already an optimum, so for a real test
   also spread positions and widths: `--bounds-fraction f` draws each free position and width uniformly

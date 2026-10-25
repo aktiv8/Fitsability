@@ -101,7 +101,7 @@ def cmd_library_list(args):
     print(f"{len(lib)} reference spectra:")
     for n in lib.names():
         r = lib.get(n)
-        o = f"origin {r.origin:.3f} eV" if r.calibrated else f"origin not calibrated (maximum at {r.max_energy:.2f} eV)"
+        o = f"origin {r.origin:.3f} eV" if r.calibrated else f"origin = maximum ({r.max_energy:.2f} eV)"
         print(f"  {n:<24}{r.be.min():.1f}-{r.be.max():.1f} eV  {o}  [{r.source}]")
 
 

@@ -23,10 +23,10 @@ def make_reference(name, shift=0.0):
     return ReferenceSpectrum(name, be, y)
 
 
-def make_block(origin_true=899.1, pos4=897.6, pos3=886.0, areas=(900.0, 300.0), names=("LS-CE4", "LS-CE3")):
+def make_block(origin_true=899.1, pos4=897.6, pos3=886.0, areas=(900.0, 300.0), names=("LS-CE4", "LS-CE3"), offset3=0.4):
     """A Casa fit with two library components (stored in kinetic energy), data generated from the references."""
     ref4, ref3 = make_reference(names[0]), make_reference(names[1], shift=-3.0)
-    ref4, ref3 = ref4.with_origin(origin_true), ref3.with_origin(ref3.max_energy + 0.4)
+    ref4, ref3 = ref4.with_origin(origin_true), ref3.with_origin(ref3.max_energy + offset3)
     x_raw = np.linspace(870.0, 925.0, 551)                     # raw binding energy
     cps = 30.0 + 0.6 * (x_raw - 870.0) + ref4.curve(x_raw, pos4, areas[0]) + ref3.curve(x_raw, pos3, areas[1])
     lo_be, hi_be = 872.0, 922.0
@@ -107,12 +107,12 @@ def test_protocol_without_reference_object_is_rejected_with_a_reason():
         Protocol([PeakSpec("a", 900.0, 1.0, shape="%&<>LS-CE4")])
 
 
-def test_uncalibrated_origin_is_flagged_and_calibration_recovers_the_truth(tmp_path):
+def test_calibration_recovers_an_origin_that_is_not_the_maximum(tmp_path):
     origin_true = 899.1
     blk, r4, r3 = make_block(origin_true=origin_true)
     naive = ReferenceLibrary([make_reference("LS-CE4"), make_reference("LS-CE3", -3.0)])      # origin unknown: assumed at the maximum
     (m0,) = casa_models(blk, library=naive)
-    assert any("not calibrated" in n for n in m0.notes) and m0.rel_rms > 0.02
+    assert m0.rel_rms > 0.02                                    # the maximum is the wrong origin for this reference
     fits = calibrate_origins(naive, [blk])
     assert set(fits) == {"LS-CE4", "LS-CE3"}
     assert fits["LS-CE4"].median == pytest.approx(origin_true, abs=0.03)
@@ -120,6 +120,49 @@ def test_uncalibrated_origin_is_flagged_and_calibration_recovers_the_truth(tmp_p
     assert fits["LS-CE4"].rel_after < 0.5 * fits["LS-CE4"].rel_before and fits["LS-CE4"].rel_after < 0.01
     naive.set_origins({n: f.median for n, f in fits.items()})
     (m1,) = casa_models(blk, library=naive)
-    assert m1.rel_rms < 0.01 and not any("not calibrated" in n for n in m1.notes)
+    assert m1.rel_rms < 0.01
     naive.save_origins(tmp_path / "origins.json")
     assert set(json.loads((tmp_path / "origins.json").read_text())) == {"LS-CE4", "LS-CE3"}
+
+
+# -- reference spectra stored in the same VAMAS file (what CasaXPS actually does) --------------------------
+def embedded_file(tmp_path, origin_true=None):
+    """A data block plus the two library spectra saved as blocks named %&<>LS-... in one file."""
+    blk, r4, r3 = make_block(origin_true=make_reference("x").max_energy, offset3=0.0)   # origin = the maximum, CasaXPS's convention
+    refs = []
+    for i, r in enumerate((r4, r3)):
+        refs.append(Block(index=2 + i, block_id=f"%&<>{r.name}", sample_id="s", species="Ce", transition="3d", hv_ev=HV,
+                          be=r.be, y=r.y, dwell_s=0.1, scans=5))
+    f = tmp_path / "embedded.vms"
+    write_vamas(f, [blk] + refs)
+    return f
+
+
+def test_references_saved_in_the_same_file_are_used_automatically(tmp_path):
+    from fitstability import read_vamas
+    f = embedded_file(tmp_path)
+    vf = read_vamas(f)
+    data = vf.blocks[0]
+    assert data.embedded_library is not None and len(data.embedded_library) == 2
+    (m,) = casa_models(data)                                        # no library supplied
+    assert m.reproduced and m.rel_rms < 0.02 and describe_skips(data) == []
+    assert {p.reference.name for p in m.protocol.peaks} == {"%&<>LS-CE4", "%&<>LS-CE3"}
+    # a library you supply wins over the embedded one
+    mine = ReferenceLibrary([make_reference("LS-CE4").with_origin(880.0), make_reference("LS-CE3", -3.0)])
+    (m2,) = casa_models(data, library=mine)
+    p = {q.name: q for q in m2.protocol.peaks}
+    assert p["Ce 4+"].reference.origin == 880.0
+
+
+def test_loading_a_data_file_as_library_takes_only_its_marked_blocks(tmp_path):
+    f = embedded_file(tmp_path)
+    lib = ReferenceLibrary.load(f)
+    assert lib.names() == ["%&<>LS-CE3", "%&<>LS-CE4"]               # not the data block
+
+
+def test_default_origin_is_the_maximum_so_no_calibration_is_needed_for_casa_references(tmp_path):
+    f = embedded_file(tmp_path)
+    from fitstability import read_vamas
+    fits = calibrate_origins(ReferenceLibrary.load(f), [read_vamas(f).blocks[0]])
+    for name, ref in (("%&<>LS-CE4", make_reference("x")), ("%&<>LS-CE3", make_reference("x", -3.0))):
+        assert fits[name].median == pytest.approx(ref.max_energy, abs=0.03)

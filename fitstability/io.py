@@ -139,8 +139,10 @@ def _protocol_from_cfg(cfg: dict, library=None) -> tuple[Protocol, float | None]
         peaks.append(PeakSpec(**d))
     bg = cfg.get("background", "shirley")
     if isinstance(bg, dict):
-        from .casa import CasaBackground
-        bg = CasaBackground(bg["casa"], int(bg.get("avg", 1)), tuple(bg.get("params", ())), float(bg.get("scale", 1.0)))
+        from .casa import BackgroundSegment, CasaBackground
+        segs = tuple(BackgroundSegment(float(g["lo"]), float(g["hi"]), g["kind"], int(g.get("avg", 1)), tuple(g.get("params", ())))
+                     for g in bg.get("segments", ()))
+        bg = CasaBackground(bg["casa"], int(bg.get("avg", 1)), tuple(bg.get("params", ())), float(bg.get("scale", 1.0)), segs)
     cs = cfg.get("count_scale")
     return Protocol(peaks, bg), (float(cs) if cs is not None else None)
 
@@ -172,6 +174,9 @@ def protocol_to_cfg(protocol: Protocol, count_scale: float | None = None) -> dic
     bg = protocol.background
     if callable(bg):
         bg = {"casa": bg.kind, "avg": bg.avg, "params": list(bg.params), "scale": bg.scale}
+        if protocol.background.segments:
+            bg["segments"] = [{"lo": g.lo, "hi": g.hi, "kind": g.kind, "avg": g.avg, "params": list(g.params)}
+                              for g in protocol.background.segments]
     cfg = {"background": bg, "peaks": peaks}
     if count_scale is not None:
         cfg["count_scale"] = count_scale

@@ -219,3 +219,54 @@ def test_reproduced_flag(tmp_path):
     assert m.reproduced
     m.rel_rms, m.rstd = 0.2, 10.0
     assert not m.reproduced
+
+
+# -- segmented regions: neighbouring same-name regions are one region with one background per segment ----------
+from fitstability.casa import BackgroundSegment, CasaRegion, region_groups, group_window
+
+
+def _reg(name, lo, hi, bg="Shirley"):
+    return CasaRegion(name, bg, lo, hi, 1, (0, 0, 0, 0, 0, 0))
+
+
+def test_region_groups_merge_neighbours_and_drop_narrow_duplicates():
+    a, b = _reg("Ce 3d", 560.6, 593.4), _reg("Ce 3d", 593.2, 614.4)               # touching: one segmented region
+    assert [[g.start_ke for g in grp] for grp in region_groups([b, a])] == [[560.6, 593.2]]
+    wide, narrow = _reg("C 1s", 1190.0, 1205.0), _reg("C 1s", 1195.0, 1200.0)       # a narrower duplicate is dropped
+    assert region_groups([narrow, wide]) == [[wide]]
+    far = _reg("C 1s", 1100.0, 1110.0)                                              # same name but apart: separate
+    assert len(region_groups([wide, far])) == 2
+    other = _reg("O 1s", 1190.0, 1205.0)                                            # a different name never merges
+    assert len(region_groups([wide, other])) == 2
+    assert group_window(region_groups([a, b])[0], 1000.0) == pytest.approx((1000.0 - 614.4, 1000.0 - 560.6))
+
+
+def test_segmented_background_is_stitched_per_segment_and_round_trips(tmp_path):
+    x = np.linspace(525.0, 545.0, 401)
+    y = 100 + 3 * (x - 525) + 400 * np.exp(-((x - 532) / 1.0) ** 2) + 300 * np.exp(-((x - 538) / 1.0) ** 2)
+    segs = (BackgroundSegment(525.0, 535.0, "Linear", 1, (0,) * 6), BackgroundSegment(534.9, 545.0, "Shirley", 1, (0,) * 6))
+    seg_bg = CasaBackground("Linear", 1, (0,) * 6, 1.0, segs)(x, y)
+    lo = (x <= 535.0)
+    assert np.allclose(seg_bg[lo], CasaBackground("Linear", 1, (0,) * 6)(x[lo], y[lo]))
+    hi = (x > 535.0)
+    assert np.allclose(seg_bg[hi], CasaBackground("Shirley", 1, (0,) * 6)(x[x >= 534.9], y[x >= 534.9])[x[x >= 534.9] > 535.0])
+    assert np.all(np.isfinite(seg_bg))
+    from fitstability import PeakSpec, Protocol, save_protocol, load_protocol
+    f = tmp_path / "seg.json"
+    save_protocol(f, Protocol([PeakSpec("a", 532.0, 1.0)], CasaBackground("Linear", 1, (0,) * 6, 1.0, segs)))
+    proto, _ = load_protocol(f)
+    assert proto.background.segments == segs
+
+
+def test_two_touching_regions_in_a_block_give_one_model_with_both_components():
+    b = _make_block(0.0, "GL(30)")
+    first = b.comments[0]                                                # region 942.68..960.68 (KE), window 526-544 BE
+    lo_ke, hi_ke = 942.68, 960.68
+    mid = 951.0
+    b.comments[0] = first.replace(f"{lo_ke:.4f} {hi_ke:.4f}" if f"{lo_ke:.4f}" in first else "942.6800 960.6800", f"{lo_ke:.4f} {mid:.4f}")
+    b.comments.insert(1, first.replace("942.6800 960.6800", f"{mid - 0.1:.4f} {hi_ke:.4f}").replace("Linear", "Shirley"))
+    models = casa_models(b)
+    assert len(models) == 1                                              # not one per segment
+    assert len(models[0].protocol.peaks) == 3
+    assert any("segmented" in n for n in models[0].notes)
+    assert len(models[0].protocol.background.segments) == 2

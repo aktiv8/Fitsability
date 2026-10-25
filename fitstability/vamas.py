@@ -59,6 +59,8 @@ class Block:
     exp_values: list = field(default_factory=list)
     comments: list = field(default_factory=list)
     timestamp: str = ""
+    # reference spectra stored as blocks named "%&<>LS-..." in the same file (CasaXPS library components)
+    embedded_library: object = field(default=None, repr=False, compare=False)
 
     @property
     def region(self) -> str:
@@ -189,7 +191,25 @@ def parse(text: str, path: str = "") -> VamasFile:
     ln.skip(4)                       # inclusion list, manually entered items, two upgrade counts
     nblocks = ln.int()
     blocks = [_read_block(ln, mode, nev, i + 1) for i in range(nblocks)]
+    _attach_embedded_library(blocks)
     return VamasFile(path, mode, blocks)
+
+
+def _attach_embedded_library(blocks) -> None:
+    """CasaXPS saves the library spectra a fit uses as extra blocks named ``%&<>LS-...`` in the same file;
+    make them available to every block (see :func:`fitstability.casa.casa_models`)."""
+    marked = [b for b in blocks if b.block_id.strip().startswith("%&")]
+    if not marked:
+        return
+    from .library import ReferenceLibrary, ReferenceSpectrum
+    lib = ReferenceLibrary()
+    for b in marked:
+        try:
+            lib.add(ReferenceSpectrum(b.block_id.strip(), b.be, b.y, None, f"block {b.index} of this file"))
+        except ValueError:
+            continue
+    for b in blocks:
+        b.embedded_library = lib
 
 
 def _read_block(ln: _Lines, mode: str, nev: int, index: int) -> Block:

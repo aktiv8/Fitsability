@@ -206,24 +206,119 @@ def reconstruct_background(kind: str, cps, ke, avg: int, params):
     return cl.background(kind, cps, avg, x=ke, params=params)
 
 
+@dataclass(frozen=True)
+class BackgroundSegment:
+    """One CasaXPS region of a segmented background, with its window in (calibrated) binding energy."""
+    lo: float
+    hi: float
+    kind: str
+    avg: int
+    params: tuple
+
+
 @dataclass
 class CasaBackground:
     """A region's CasaXPS background as a picklable ``f(x, y)`` on ascending binding energy.
 
     ``scale`` converts y (counts) to the counts-per-second the background functions expect.
+    ``segments``: CasaXPS joins neighbouring regions of one name into a single segmented background,
+    each segment computed on its own window; the pieces are stitched (a point shared by two segments
+    keeps the first's value). Empty for an ordinary single-window region.
     """
     kind: str
     avg: int
     params: tuple
     scale: float = 1.0
+    segments: tuple = ()
 
-    def __call__(self, x, y):
+    def _one(self, x, y, kind, avg, params):
         ke = -np.asarray(x, float)[::-1]            # ascending kinetic energy (up to a constant)
         cps = np.asarray(y, float)[::-1] / self.scale
-        bg = reconstruct_background(self.kind, cps, ke, self.avg, self.params)
+        bg = reconstruct_background(kind, cps, ke, avg, params)
         if bg is None:
-            raise CasaFitError(f"background type {self.kind!r} cannot be reconstructed")
+            raise CasaFitError(f"background type {kind!r} cannot be reconstructed")
         return (np.asarray(bg, float) * self.scale)[::-1]
+
+    def __call__(self, x, y):
+        x, y = np.asarray(x, float), np.asarray(y, float)
+        if not self.segments:
+            return self._one(x, y, self.kind, self.avg, self.params)
+        out = np.full(len(x), np.nan)
+        for seg in sorted(self.segments, key=lambda g: g.lo):
+            win = (x >= seg.lo - 1e-6) & (x <= seg.hi + 1e-6)          # the segment's whole window ...
+            if win.sum() < 3:
+                continue
+            bg = self._one(x[win], y[win], seg.kind, seg.avg, seg.params)
+            free = np.isnan(out[win])                                   # ... but a shared point keeps the first value
+            out[np.flatnonzero(win)[free]] = bg[free]
+        good = np.isfinite(out)
+        if not good.any():
+            raise CasaFitError("no segment of the background covers the data")
+        if not good.all():                                   # points in the sliver between segments
+            out[~good] = np.interp(x[~good], x[good], out[good])
+        return out
+
+
+DUPLICATE_OVERLAP = 0.25     # share of the narrower window that makes two same-name regions duplicates
+SEGMENT_GAP = 0.25           # eV: same-name regions this close form one segmented background
+
+
+def _overlap(a, b) -> float:
+    return max(0.0, min(a.end_ke, b.end_ke) - max(a.start_ke, b.start_ke))
+
+
+def region_groups(regions) -> list[list]:
+    """CasaXPS regions as the analyst sees them: of several overlapping regions that share a name only
+    the widest is kept (CasaXPS keeps earlier ones when a wider one is added), and same-name regions
+    whose windows touch (a gap of at most 0.25 eV, or a sliver of overlap) form one *segmented* region
+    with one background per segment. Returns lists of regions, each ordered by kinetic energy."""
+    keep = []
+    for reg in sorted(regions, key=lambda g: g.start_ke - g.end_ke):
+        width = reg.end_ke - reg.start_ke
+        dup = False
+        for k in keep:
+            if k.name != reg.name:
+                continue
+            narrow = min(width, k.end_ke - k.start_ke)
+            if narrow > 0 and _overlap(reg, k) > DUPLICATE_OVERLAP * narrow:
+                dup = True
+                break
+            if narrow <= 0 and reg.start_ke < k.end_ke and k.start_ke < reg.end_ke:
+                dup = True
+                break
+        if not dup:
+            keep.append(reg)
+    kept = [g for g in regions if any(g is k for k in keep)]
+    groups, used = [], set()
+    for reg in kept:
+        if id(reg) in used:
+            continue
+        group = [reg]
+        used.add(id(reg))
+        grew = True
+        while grew:
+            grew = False
+            lo, hi = min(g.start_ke for g in group), max(g.end_ke for g in group)
+            for other in kept:
+                if id(other) not in used and other.name == reg.name \
+                        and other.start_ke <= hi + SEGMENT_GAP and other.end_ke >= lo - SEGMENT_GAP:
+                    group.append(other)
+                    used.add(id(other))
+                    grew = True
+        groups.append(sorted(group, key=lambda g: g.start_ke))
+    return groups
+
+
+def group_window(group, off_reg: float) -> tuple[float, float]:
+    """(low, high) calibrated binding energy covered by a region group."""
+    return off_reg - max(g.end_ke for g in group), off_reg - min(g.start_ke for g in group)
+
+
+def group_background(group, off_reg: float, k: float) -> CasaBackground:
+    first = group[0]
+    segs = tuple(BackgroundSegment(off_reg - g.end_ke, off_reg - g.start_ke, g.background, g.avg, g.params)
+                 for g in group) if len(group) > 1 else ()
+    return CasaBackground(first.background, first.avg, first.params, k, segs)
 
 
 @dataclass
@@ -293,9 +388,10 @@ def casa_models(block, area_units: str = "counts", regions: list[str] | None = N
     ``area_units``: ``"counts"`` (default) if the ordinate is counts, so stored areas (counts/s x eV)
     are multiplied by dwell x scans; ``"cps"`` if it is already counts per second.
 
-    ``library`` is a :class:`~fitstability.library.ReferenceLibrary` supplying the reference spectra of
-    CasaXPS library-spectrum components (shape ``%&<>LS-...``); without it (or without the right
-    reference) a region using one is skipped, with the names it needs.
+    CasaXPS library-spectrum components (shape ``%&<>LS-...``) need their reference spectra. CasaXPS saves
+    them as extra blocks named ``%&<>LS-...`` in the same file, and those are used automatically. A
+    :class:`~fitstability.library.ReferenceLibrary` passed as ``library`` supplies any that are not there
+    (or overrides them); a region whose references are in neither is skipped, with the names it needs.
 
     Each model carries how well CasaXPS's saved fit reproduces the data (``rel_rms``, ``rstd``). If it
     does not (relative rms above 0.15, or the envelope more than 3x the data), the stored areas are
@@ -308,6 +404,10 @@ def casa_models(block, area_units: str = "counts", regions: list[str] | None = N
     fit = parse_fit(block.comments)
     if fit is None or not fit.comps:
         raise CasaFitError(f"{block.label}: no CasaXPS fit found in the block comments")
+    embedded = getattr(block, "embedded_library", None)
+    if embedded is not None:                       # library spectra saved in the same file; yours win
+        from .library import ReferenceLibrary
+        library = (library or ReferenceLibrary()).over(embedded)
     if area_units not in ("counts", "cps"):
         raise ValueError("area_units must be 'counts' or 'cps'")
     k = float(block.dwell_s * block.scans) if area_units == "counts" and block.dwell_s and block.scans else 1.0
@@ -318,14 +418,15 @@ def casa_models(block, area_units: str = "counts", regions: list[str] | None = N
     off_comp = hv + calib - cshift              # BE (calibrated) = off_comp - stored KE position
     off_reg = hv + calib - rshift
     models, fit.skipped = [], []
-    for reg in fit.regions:
+    for group in region_groups(fit.regions):
+        reg = group[0]
         comps = fit.comps_of(reg)
         if regions and reg.name not in regions:
             continue
         if not comps:
             continue
         try:
-            models.append(_build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library,
+            models.append(_build(fit, group, comps, x_all, y_all, off_comp, off_reg, k, library,
                                  1.0 if area_units == "counts" else (block.dwell_s * block.scans if block.dwell_s and block.scans else 1.0)))
         except CasaFitError as e:
             fit.skipped.append((reg.name, str(e)))
@@ -339,7 +440,8 @@ def describe_skips(block) -> list[str]:
     return [f"region {r!r} skipped: {why}" for r, why in getattr(block, "_casa_skipped", [])]
 
 
-def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library, count_scale=1.0) -> CasaModel:
+def _build(fit, group, comps, x_all, y_all, off_comp, off_reg, k, library, count_scale=1.0) -> CasaModel:
+    reg = group[0]
     for c in comps:
         if c.shape.startswith("%&"):
             continue                                       # library spectrum: resolved below
@@ -359,8 +461,8 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library, count_s
         need = library.missing(lib_shapes) if library is not None else sorted({s.lstrip("%&<>") for s in lib_shapes})
         if need:
             raise CasaFitError("uses CasaXPS library spectra that are not loaded: " + ", ".join(need) +
-                               ". They live in CasaXPS's library, not in the file: supply them as reference spectra "
-                               "(--library, or Reference spectra... in the GUI)")
+                               ". They live in CasaXPS's library and are not stored in this file: supply them as reference "
+                               "spectra (--library, or Reference spectra... in the GUI)")
     ids = {c.index: i for i, c in enumerate(comps)}
     names = _unique_names(comps)
     peaks, notes, approx = [], [], []
@@ -389,17 +491,17 @@ def _build(fit, reg, comps, x_all, y_all, off_comp, off_reg, k, library, count_s
         if c.shape.startswith("%&"):
             ref = library.get(c.shape)
             kw["reference"], kw["fix_fwhm"], kw["fwhm_tie"] = ref, True, None   # width is not a parameter of a library shape
-            if not ref.calibrated and "uncalibrated" not in "".join(notes):
-                notes.append("library spectrum origin not calibrated: assumed at each reference's maximum "
-                             "(run `fitstability library calibrate` on a file Casa fitted with them)")
         kw["area_bounds"] = (max(c.area.lo, 0.0) * k, c.area.hi * k)
         peaks.append(PeakSpec(name=names[len(peaks)], pos=pos_be, fwhm=c.fwhm.value, shape=c.shape, **kw))
         if not c.shape.startswith("%&") and not cl.is_exact(c.shape) and c.shape.split("(")[0] not in approx:
             approx.append(c.shape.split("(")[0])
     if approx:
         notes.append(f"{'/'.join(approx)} line shapes are reconstructions of CasaXPS's, not its own code (GL/SGL are exact)")
-    bg = CasaBackground(reg.background, reg.avg, reg.params, k)
-    lo, hi = off_reg - reg.end_ke, off_reg - reg.start_ke
+    bg = group_background(group, off_reg, k)
+    lo, hi = group_window(group, off_reg)
+    if len(group) > 1:
+        notes.append(f"{len(group)} neighbouring CasaXPS regions of this name form one segmented region "
+                     f"(backgrounds: {', '.join(g.background for g in group)})")
     sel = (x_all >= lo - 1e-6) & (x_all <= hi + 1e-6)
     if sel.sum() < 10:
         raise CasaFitError(f"only {int(sel.sum())} data points inside the region window")
@@ -480,15 +582,16 @@ def background_check(block, area_units: str = "counts") -> list[BackgroundCheck]
     y_all = np.asarray(block.y, float)
     off_reg = block.hv_ev + fit.calib_shift - fit.shift_of_regions()
     out = []
-    for reg in fit.regions:
-        lo, hi = off_reg - reg.end_ke, off_reg - reg.start_ke
+    for group in region_groups(fit.regions):
+        reg = group[0]
+        lo, hi = group_window(group, off_reg)
         sel = (x_all >= lo - 1e-6) & (x_all <= hi + 1e-6)
         if sel.sum() < 10:
             out.append(BackgroundCheck(reg.name, reg.background, False, float("nan"), float("nan"), "fewer than 10 points"))
             continue
         x, y = x_all[sel], y_all[sel]
         try:
-            bg = CasaBackground(reg.background, reg.avg, reg.params, k)(x, y)
+            bg = group_background(group, off_reg, k)(x, y)
         except CasaFitError as e:
             out.append(BackgroundCheck(reg.name, reg.background, False, float("nan"), float("nan"), str(e)))
             continue

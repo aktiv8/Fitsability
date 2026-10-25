@@ -198,7 +198,6 @@ def test_library_spectra_missing_then_supplied_then_calibrated(app, win, tmp_pat
     assert win.table.rowCount() == 0 and "not loaded" in win.lbl_notes.text() and "LS-CE4" in win.lbl_notes.text()
     win._add_reference_paths([refs])                      # the dialog buttons call this
     assert len(win.library) == 2 and win.table.rowCount() == 2
-    assert any("not calibrated" in n for n in win.notes)
     assert win.act_calibrate.isEnabled()
     win.calibrate_references()
     wait(app, win)
